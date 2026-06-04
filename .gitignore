@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test data (large map files, not version-controlled)
+tests/data/*.osm
+
+# Hydra working directory
+outputs/
+multirun/

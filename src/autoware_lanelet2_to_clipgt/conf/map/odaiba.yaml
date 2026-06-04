@@ -1,0 +1,11 @@
+# Odaiba map configuration (matches autoware_lanelet2_to_opendrive/conf/map/odaiba.yaml).
+#
+# Origin defines where local (x, y, z) = (0, 0, 0) lands in UTM. The
+# UtmProjector then converts every lanelet2 node to this local Cartesian
+# frame (right-handed, Z-up, metres) — same convention as ClipGT.
+
+mgrs_grid: 54SUE
+offset:
+  x: 92008.5
+  y: 45335.1
+  z: 0

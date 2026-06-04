@@ -1,0 +1,21 @@
+# Example map configuration. Copy and customise for a new map.
+#
+# Provide ONE of the following origin specifications:
+#
+# 1. MGRS grid code (optionally with sub-grid coordinates):
+# mgrs_grid: 54SUE815501
+#
+# 2. MGRS grid + offset (metres within the grid square):
+# mgrs_grid: 54SUE
+# offset:
+#   x: 81655.73
+#   y: 50137.43
+#   z: 42.49998
+#
+# 3. Lat/lon directly:
+# lat_lon:
+#   latitude: 35.6895
+#   longitude: 139.6917
+#   altitude: 42.5
+
+mgrs_grid: 54SUE

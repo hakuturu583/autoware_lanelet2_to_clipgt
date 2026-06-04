@@ -1,0 +1,17 @@
+# Hydra configuration for Lanelet2 → ClipGT conversion.
+# Usage:
+#   uv run python -m autoware_lanelet2_to_clipgt map=odaiba \
+#     input_map_path=tests/data/odaiba.osm output_dir=out/
+
+defaults:
+  - _self_
+  - map: odaiba
+
+# Required: path to the input Lanelet2 .osm file (override via CLI).
+input_map_path: ???
+
+# Required: directory the parquet bundle is written to (override via CLI).
+output_dir: ???
+
+# Optional override stored in row keys; defaults to a fresh UUID.
+clip_id: null
