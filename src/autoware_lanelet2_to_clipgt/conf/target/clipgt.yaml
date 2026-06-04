@@ -1,0 +1,3 @@
+# ClipGT output target (default).
+# File layout: <out_dir>/<element>.parquet (bare names, no clip_id prefix).
+format: clipgt

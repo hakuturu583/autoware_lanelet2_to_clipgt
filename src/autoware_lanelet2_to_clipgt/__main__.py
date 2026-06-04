@@ -27,7 +27,8 @@ import hydra
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
-from .converter import convert
+from . import converter as clipgt_converter
+from .cosmos_transfer2_5 import converter as cosmos_converter
 from .projection import origin_from_map_config
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,17 @@ def main(cfg: DictConfig) -> int:
     pos = origin.position
     logger.info("origin: lat=%.8f lon=%.8f alt=%.3f", pos.lat, pos.lon, pos.alt)
 
-    stats = convert(osm_path, out_dir, origin, clip_id=cfg.get("clip_id"))
+    target_cfg = cfg.get("target") or {}
+    fmt = (target_cfg.get("format") if hasattr(target_cfg, "get") else getattr(target_cfg, "format", None)) or "clipgt"
+    logger.info("output format: %s", fmt)
+
+    if fmt == "clipgt":
+        stats = clipgt_converter.convert(osm_path, out_dir, origin, clip_id=cfg.get("clip_id"))
+    elif fmt == "cosmos_transfer2_5":
+        stats = cosmos_converter.convert(osm_path, out_dir, origin, clip_id=cfg.get("clip_id"))
+    else:
+        print(f"error: unknown target.format '{fmt}'", file=sys.stderr)
+        return 1
     print(stats)
     return 0
 

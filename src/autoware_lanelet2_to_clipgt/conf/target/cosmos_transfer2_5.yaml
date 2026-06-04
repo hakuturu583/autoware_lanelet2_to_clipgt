@@ -1,0 +1,4 @@
+# cosmos-transfer2.5 world-scenario output target.
+# File layout: <out_dir>/{clip_id}.<element>.parquet (AV2-style prefix).
+# Reference: nvidia-cosmos/cosmos-transfer2.5/docs/world_scenario_parquet.md
+format: cosmos_transfer2_5
