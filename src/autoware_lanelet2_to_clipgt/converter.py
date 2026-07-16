@@ -91,18 +91,56 @@ def _pt(p) -> dict:
 
 
 def _load_ecef_scene_transform(tileset_json_path: Path) -> np.ndarray:
-    """Return ``T_scene_ecef`` (4x4) for aligning ECEF points to a scene frame.
+    """Return ``T_enu_ecef`` (4x4) for mapping ECEF points into an ENU frame
+    centered at the tileset's origin.
 
     ``tileset.json`` root ``transform`` is ``T_ecef_scene`` (column-major, per
-    3D Tiles spec). We invert it so that ECEF coordinates emitted by
-    lanelet2's ``GeocentricProjector`` land in the scene's local frame — the
-    same frame ``rig_trajectories.json`` inside the USDZ lives in.
+    3D Tiles spec) — its translation is the scene origin in ECEF, and its
+    rotation maps a scene-local basis (typically East-Down-North for
+    Autoware/NuRec exports) into ECEF. Alpasim's runtime, however, drives its
+    ego trajectory in a standard ENU frame (X=East, Y=North, Z=Up), so we
+    return a transform that leaves the *translation* alone (same origin) but
+    replaces the *rotation* with ENU-at-origin — regardless of the tileset's
+    stored scene axes.
     """
     with open(tileset_json_path) as f:
         tileset = json.load(f)
     transform_flat = tileset["root"]["transform"]
     T_ecef_scene = np.array(transform_flat, dtype=np.float64).reshape(4, 4).T
-    return np.linalg.inv(T_ecef_scene)
+    ecef_origin = T_ecef_scene[:3, 3]
+    return _enu_from_ecef_at(ecef_origin)
+
+
+def _enu_from_ecef_at(ecef_origin: np.ndarray) -> np.ndarray:
+    """Build the 4x4 ``T_enu_ecef`` for the ENU frame centered at ``ecef_origin``."""
+    x, y, z = ecef_origin
+    # Geodetic lat/lon on the WGS-84 ellipsoid (Bowring's closed-form solution).
+    a = 6378137.0
+    f = 1.0 / 298.257223563
+    e2 = f * (2.0 - f)
+    b = a * (1.0 - f)
+    ep2 = (a * a - b * b) / (b * b)
+    p = math.hypot(x, y)
+    theta = math.atan2(z * a, p * b)
+    lat = math.atan2(
+        z + ep2 * b * math.sin(theta) ** 3,
+        p - e2 * a * math.cos(theta) ** 3,
+    )
+    lon = math.atan2(y, x)
+    sl, cl = math.sin(lat), math.cos(lat)
+    so, co = math.sin(lon), math.cos(lon)
+    # Rows of R_enu_ecef are the ENU basis vectors expressed in ECEF.
+    R_enu_ecef = np.array(
+        [
+            [-so, co, 0.0],
+            [-sl * co, -sl * so, cl],
+            [cl * co, cl * so, sl],
+        ]
+    )
+    T = np.eye(4)
+    T[:3, :3] = R_enu_ecef
+    T[:3, 3] = -R_enu_ecef @ ecef_origin
+    return T
 
 
 def _polyline(ls) -> list[dict]:

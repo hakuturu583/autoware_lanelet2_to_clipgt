@@ -200,12 +200,35 @@ def test_lane_rails_have_matching_lengths(clipgt_bundle: Path):
 # --- tileset_json (scene-frame alignment) --------------------------------
 
 
-def test_load_ecef_scene_transform_inverts_translation(tmp_path: Path):
-    # Identity rotation + non-zero translation: inverse should shift ECEF back to origin.
-    tileset = _write_tileset_json(tmp_path, (100.0, 200.0, 300.0))
-    T_scene_ecef = converter._load_ecef_scene_transform(tileset)
-    origin_scene = T_scene_ecef @ np.array([100.0, 200.0, 300.0, 1.0])
-    assert origin_scene[:3] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+def test_load_ecef_scene_transform_puts_tileset_origin_at_enu_zero(
+    tmp_path: Path,
+):
+    # Use a real ECEF point (Odaiba, ~lat 35.63, lon 139.78) so the geodetic
+    # inversion has meaningful lat/lon to work with.
+    ecef = (-3963058.88, 3351535.88, 3694602.27)
+    tileset = _write_tileset_json(tmp_path, ecef)
+    T_enu_ecef = converter._load_ecef_scene_transform(tileset)
+    origin_enu = T_enu_ecef @ np.array([*ecef, 1.0])
+    assert origin_enu[:3] == pytest.approx([0.0, 0.0, 0.0], abs=1e-3)
+
+
+def test_load_ecef_scene_transform_maps_ecef_radial_to_enu_up(
+    tmp_path: Path,
+):
+    # A point 100 m further from Earth's center along the same radial as the
+    # origin should map to almost (0, 0, +100) — Z is Up in the returned ENU
+    # frame. (Radial is not exactly Up over a spheroid, but at 35°N the
+    # deflection is well under a metre for a 100 m displacement.)
+    ecef_origin = np.array([-3963058.88, 3351535.88, 3694602.27])
+    radial = ecef_origin / np.linalg.norm(ecef_origin)
+    ecef_above = ecef_origin + 100.0 * radial
+
+    tileset = _write_tileset_json(tmp_path, tuple(ecef_origin))
+    T = converter._load_ecef_scene_transform(tileset)
+    p = T @ np.array([*ecef_above, 1.0])
+    assert p[2] == pytest.approx(100.0, abs=2.0)   # z is Up
+    assert abs(p[0]) < 2.0                          # x (East)  ~ 0
+    assert abs(p[1]) < 2.0                          # y (North) ~ 0
 
 
 @requires_fixture
