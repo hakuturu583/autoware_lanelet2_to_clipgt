@@ -18,6 +18,8 @@ that :func:`visualize_clipgt_topdown.find_scene_dir` can read directly:
       traffic_light.parquet
       traffic_sign.parquet
       egomotion_estimate.parquet   (empty placeholder)
+      association.parquet          (lane relations: NEXT/PREVIOUS/LEFT/RIGHT)
+      clip.parquet                 (single-row clip metadata)
 
 Coordinates are projected with ``UtmProjector(useOffset=True)`` so the scene
 sits near the origin in metres (ClipGT convention: right-handed, Z-up, m).
@@ -81,6 +83,48 @@ def _polyline(ls) -> list[dict]:
     return [_pt(p) for p in ls]
 
 
+def _resample_polyline(pts: list[dict], n: int) -> list[dict]:
+    """Resample a polyline to exactly ``n`` points via arc-length linear interp.
+
+    Downstream consumers (e.g. trajdata ``populate_vector_map``) compute the
+    per-lane centerline as ``(left + right) / 2`` and therefore require both
+    rails to share the same length.
+    """
+    if len(pts) == n:
+        return list(pts)
+    xs = [p["x"] for p in pts]
+    ys = [p["y"] for p in pts]
+    zs = [p["z"] for p in pts]
+    seg_lens = [
+        math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i], zs[i + 1] - zs[i])
+        for i in range(len(pts) - 1)
+    ]
+    cum = [0.0]
+    for s in seg_lens:
+        cum.append(cum[-1] + s)
+    total = cum[-1]
+    if total <= 0.0:
+        # Degenerate rail (all points coincident); replicate the first point.
+        return [dict(pts[0]) for _ in range(n)]
+    out: list[dict] = []
+    for i in range(n):
+        target = total * i / (n - 1)
+        # Find segment containing `target`.
+        j = 0
+        while j + 1 < len(cum) - 1 and cum[j + 1] < target:
+            j += 1
+        seg = cum[j + 1] - cum[j]
+        t = 0.0 if seg <= 0.0 else (target - cum[j]) / seg
+        out.append(
+            {
+                "x": xs[j] + t * (xs[j + 1] - xs[j]),
+                "y": ys[j] + t * (ys[j + 1] - ys[j]),
+                "z": zs[j] + t * (zs[j + 1] - zs[j]),
+            }
+        )
+    return out
+
+
 def _polygon_from_lanelet(ll) -> list[dict]:
     """Build a closed polygon from a lanelet's left + reversed right bound."""
     pts = [_pt(p) for p in ll.leftBound]
@@ -104,6 +148,15 @@ def _make_key(clip_id: str, map_id: int | str) -> dict:
         "label_class_id": LABEL_CLASS_ID,
         "map_id": str(map_id),
         "map_id_version": MAP_VERSION,
+    }
+
+
+def _make_association_key(clip_id: str, map_id: str, kind: str) -> dict:
+    return {
+        "clip_id": clip_id,
+        "label_class_id": LABEL_CLASS_ID,
+        "map_id": str(map_id),
+        "kind": kind,
     }
 
 
@@ -132,6 +185,11 @@ def _extract_lanes(map_, clip_id: str) -> tuple[list[dict], list[dict]]:
         right_pts = _polyline(ll.rightBound)
         if len(left_pts) < 2 or len(right_pts) < 2:
             continue
+        # populate_vector_map computes centerline as (left+right)/2, requiring
+        # matched lengths. Resample the shorter rail up to the longer one.
+        n = max(len(left_pts), len(right_pts))
+        left_pts = _resample_polyline(left_pts, n)
+        right_pts = _resample_polyline(right_pts, n)
         if subtype == "crosswalk":
             crosswalks.append(
                 {
@@ -232,19 +290,11 @@ def _extract_linestring_elements(
                 }
             )
         elif ls_type == "stop_line":
-            out["wait_line"].append(
-                {
-                    "key": _make_key(clip_id, ls.id),
-                    "wait_line": {
-                        "category": "STOP",
-                        "location": pts,
-                        "is_implicit": False,
-                        "intersection_subtype": "NOT_APPLICABLE",
-                        "egomotion_label_class_id": LABEL_CLASS_ID,
-                    },
-                    "version": SCHEMA_VERSION,
-                }
-            )
+            # wait_line rows are keyed as ``{stop_line_id}-{lane_id}`` because
+            # ``trajdata.mads_utils.populate_vector_map`` derives the associated
+            # lane from that split. Emission is deferred to _extract_wait_lines
+            # so we can iterate over stop_line ↔ lanelet pairs.
+            pass
         elif ls_type == "traffic_light":
             row = _linestring_to_oriented_bbox(
                 ls, pts, height=float(_attr(ls, "height", "0.5") or 0.5),
@@ -392,6 +442,163 @@ def _extract_poles(traffic_lights: list[dict], traffic_signs: list[dict], clip_i
     return rows
 
 
+def _extract_wait_lines(
+    map_,
+    clip_id: str,
+    stop_line_to_lanelets: dict[str, set[str]],
+    emitted_lane_ids: set[str],
+) -> list[dict]:
+    """Emit one wait_line row per (stop_line, lanelet) pair, keyed ``{stop_line_id}-{lane_id}``."""
+    rows: list[dict] = []
+    for ls in map_.lineStringLayer:
+        if _attr(ls, "type") != "stop_line":
+            continue
+        pts = _polyline(ls)
+        if len(pts) < 2:
+            continue
+        lanelets = stop_line_to_lanelets.get(str(ls.id), set())
+        # Only keep lanelets we actually emitted as lanes; skip the stop_line
+        # entirely if none remain (downstream `.split("-")[1]` needs a lane id).
+        for lane_id in sorted(l for l in lanelets if l in emitted_lane_ids):
+            rows.append(
+                {
+                    "key": _make_key(clip_id, f"{ls.id}-{lane_id}"),
+                    "wait_line": {
+                        "category": "STOP",
+                        "location": pts,
+                        "is_implicit": False,
+                        "intersection_subtype": "NOT_APPLICABLE",
+                        "egomotion_label_class_id": LABEL_CLASS_ID,
+                    },
+                    "version": SCHEMA_VERSION,
+                }
+            )
+    return rows
+
+
+def _parse_stop_line_lanelet_pairs(osm_path: Path) -> dict[str, set[str]]:
+    """Return ``{stop_line_way_id: {lanelet_id, ...}}`` from raw OSM XML.
+
+    Lanelet2's Python bindings surface ``RegulatoryElement.parameters`` as an
+    empty map for un-typed regs, so we walk the XML directly:
+
+        <relation type="lanelet"> --member role="regulatory_element"-->
+        <relation type="regulatory_element"> --member role="ref_line"-->
+        <way type="stop_line">
+    """
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(str(osm_path))
+    root = tree.getroot()
+
+    reg_to_ref_lines: dict[str, list[str]] = {}
+    lanelet_to_regs: dict[str, list[str]] = {}
+    stop_line_ways: set[str] = set()
+
+    for rel in root.findall("relation"):
+        tags = {t.attrib["k"]: t.attrib["v"] for t in rel.findall("tag")}
+        rel_type = tags.get("type")
+        if rel_type == "regulatory_element":
+            refs = [
+                m.attrib["ref"]
+                for m in rel.findall("member")
+                if m.attrib.get("role") == "ref_line"
+                and m.attrib.get("type") == "way"
+            ]
+            if refs:
+                reg_to_ref_lines[rel.attrib["id"]] = refs
+        elif rel_type == "lanelet":
+            regs = [
+                m.attrib["ref"]
+                for m in rel.findall("member")
+                if m.attrib.get("role") == "regulatory_element"
+                and m.attrib.get("type") == "relation"
+            ]
+            if regs:
+                lanelet_to_regs[rel.attrib["id"]] = regs
+
+    for way in root.findall("way"):
+        tags = {t.attrib["k"]: t.attrib["v"] for t in way.findall("tag")}
+        if tags.get("type") == "stop_line":
+            stop_line_ways.add(way.attrib["id"])
+
+    pairs: dict[str, set[str]] = {}
+    for lid, regs in lanelet_to_regs.items():
+        for rid in regs:
+            for sid in reg_to_ref_lines.get(rid, []):
+                if sid in stop_line_ways:
+                    pairs.setdefault(sid, set()).add(lid)
+    return pairs
+
+
+def _extract_associations(
+    map_, clip_id: str, emitted_lane_ids: set[str]
+) -> list[dict]:
+    """Emit lane-lane relations (NEXT/PREVIOUS/LEFT/RIGHT) via the lanelet2 routing graph.
+
+    Consumers such as ``trajdata.dataset_specific.mads.mads_utils.populate_vector_map``
+    treat ``Association.subjects`` as a single-element list, so we emit one row per
+    (source_lane, kind) pair with ``objects`` listing every reachable target.
+    """
+    import lanelet2
+
+    rules = lanelet2.traffic_rules.create(
+        lanelet2.traffic_rules.Locations.Germany,
+        lanelet2.traffic_rules.Participants.Vehicle,
+    )
+    graph = lanelet2.routing.RoutingGraph(map_, rules)
+
+    rows: list[dict] = []
+
+    def _emit(source_id: str, kind: str, objects: list[str]) -> None:
+        objects = [o for o in objects if o in emitted_lane_ids]
+        if not objects:
+            return
+        rows.append(
+            {
+                "key": _make_association_key(
+                    clip_id, f"{source_id}-{kind}", kind
+                ),
+                "association": {
+                    "subjects": [source_id],
+                    "objects": objects,
+                },
+                "version": SCHEMA_VERSION,
+            }
+        )
+
+    for ll in map_.laneletLayer:
+        source_id = str(ll.id)
+        if source_id not in emitted_lane_ids:
+            continue
+        _emit(source_id, "NEXT_LANE", [str(x.id) for x in graph.following(ll)])
+        _emit(source_id, "PREVIOUS_LANE", [str(x.id) for x in graph.previous(ll)])
+        left = graph.left(ll)
+        if left is not None:
+            _emit(source_id, "LEFT_LANE", [str(left.id)])
+        right = graph.right(ll)
+        if right is not None:
+            _emit(source_id, "RIGHT_LANE", [str(right.id)])
+
+    return rows
+
+
+def _build_clip_row(clip_id: str) -> dict:
+    """Single-row clip metadata; downstream (populate_vector_map) only reads key.clip_id."""
+    return {
+        "key": {
+            "session_id": clip_id,
+            "clip_id": clip_id,
+            "time_range": {"start_micros": 0, "end_micros": 0},
+        },
+        "clip": {
+            "ground_truth_calibration": "",
+            "ground_truth_egomotion": "",
+        },
+        "version": SCHEMA_VERSION,
+    }
+
+
 # --- Public API ---
 
 
@@ -435,6 +642,12 @@ def convert(
     poly_elems = _extract_polygons(map_, clip_id)
     crosswalks = poly_elems["crosswalk"] + crosswalk_lanelets
     poles = _extract_poles(line_elems["traffic_light"], line_elems["traffic_sign"], clip_id)
+    emitted_lane_ids = {row["key"]["map_id"] for row in lanes}
+    associations = _extract_associations(map_, clip_id, emitted_lane_ids)
+    stop_line_to_lanelets = _parse_stop_line_lanelet_pairs(osm_path)
+    line_elems["wait_line"] = _extract_wait_lines(
+        map_, clip_id, stop_line_to_lanelets, emitted_lane_ids
+    )
 
     counts: dict[str, int] = {}
     counts["lane"] = _write(lanes, schemas.LANE, out_dir / "lane.parquet")
@@ -449,6 +662,8 @@ def convert(
     counts["road_island"] = _write(poly_elems["road_island"], schemas.ROAD_ISLAND, out_dir / "road_island.parquet")
     counts["pole"] = _write(poles, schemas.POLE, out_dir / "pole.parquet")
     counts["egomotion_estimate"] = _write([], schemas.EGOMOTION_ESTIMATE, out_dir / "egomotion_estimate.parquet")
+    counts["association"] = _write(associations, schemas.ASSOCIATION, out_dir / "association.parquet")
+    counts["clip"] = _write([_build_clip_row(clip_id)], schemas.CLIP, out_dir / "clip.parquet")
 
     return ConversionStats(out_dir=out_dir, counts=counts)
 

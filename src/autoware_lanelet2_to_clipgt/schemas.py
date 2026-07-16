@@ -212,3 +212,66 @@ EGOMOTION_ESTIMATE = pa.schema(
         ("version", pa.uint64()),
     ]
 )
+
+
+def _association_key() -> pa.StructType:
+    return pa.struct(
+        [
+            ("clip_id", pa.string()),
+            ("label_class_id", pa.string()),
+            ("map_id", pa.string()),
+            ("kind", pa.string()),
+        ]
+    )
+
+
+ASSOCIATION = pa.schema(
+    [
+        ("key", _association_key()),
+        (
+            "association",
+            pa.struct(
+                [
+                    ("subjects", pa.list_(pa.string())),
+                    ("objects", pa.list_(pa.string())),
+                ]
+            ),
+        ),
+        ("version", pa.uint64()),
+    ]
+)
+
+
+def _clip_key() -> pa.StructType:
+    return pa.struct(
+        [
+            ("session_id", pa.string()),
+            ("clip_id", pa.string()),
+            (
+                "time_range",
+                pa.struct(
+                    [
+                        ("start_micros", pa.int64()),
+                        ("end_micros", pa.int64()),
+                    ]
+                ),
+            ),
+        ]
+    )
+
+
+CLIP = pa.schema(
+    [
+        ("key", _clip_key()),
+        (
+            "clip",
+            pa.struct(
+                [
+                    ("ground_truth_calibration", pa.string()),
+                    ("ground_truth_egomotion", pa.string()),
+                ]
+            ),
+        ),
+        ("version", pa.uint64()),
+    ]
+)
