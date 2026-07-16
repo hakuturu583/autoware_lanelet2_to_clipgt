@@ -27,11 +27,13 @@ sits near the origin in metres (ClipGT convention: right-handed, Z-up, m).
 
 from __future__ import annotations
 
+import json
 import math
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -40,6 +42,11 @@ from . import schemas
 LABEL_CLASS_ID = "lanelet2:autoware:v0"
 MAP_VERSION = "1"
 SCHEMA_VERSION = 1
+
+# When set, every point emitted by _pt is first mapped from the projector's
+# native frame (ECEF, when a scene alignment is requested) into the target
+# scene-local frame. Configured by ``convert()`` and cleared afterwards.
+_POINT_TRANSFORM: np.ndarray | None = None
 
 
 # --- Style / category lookup tables (lanelet2 → ClipGT) ---
@@ -76,7 +83,26 @@ ROAD_MARKING_CATEGORY = {
 
 
 def _pt(p) -> dict:
-    return {"x": float(p.x), "y": float(p.y), "z": float(p.z)}
+    x, y, z = float(p.x), float(p.y), float(p.z)
+    if _POINT_TRANSFORM is not None:
+        v = _POINT_TRANSFORM @ np.array([x, y, z, 1.0])
+        x, y, z = float(v[0]), float(v[1]), float(v[2])
+    return {"x": x, "y": y, "z": z}
+
+
+def _load_ecef_scene_transform(tileset_json_path: Path) -> np.ndarray:
+    """Return ``T_scene_ecef`` (4x4) for aligning ECEF points to a scene frame.
+
+    ``tileset.json`` root ``transform`` is ``T_ecef_scene`` (column-major, per
+    3D Tiles spec). We invert it so that ECEF coordinates emitted by
+    lanelet2's ``GeocentricProjector`` land in the scene's local frame — the
+    same frame ``rig_trajectories.json`` inside the USDZ lives in.
+    """
+    with open(tileset_json_path) as f:
+        tileset = json.load(f)
+    transform_flat = tileset["root"]["transform"]
+    T_ecef_scene = np.array(transform_flat, dtype=np.float64).reshape(4, 4).T
+    return np.linalg.inv(T_ecef_scene)
 
 
 def _polyline(ls) -> list[dict]:
@@ -620,20 +646,41 @@ def convert(
     origin,
     *,
     clip_id: str | None = None,
+    tileset_json: str | Path | None = None,
 ) -> ConversionStats:
     """Parse ``osm_path`` and write a ClipGT parquet bundle to ``out_dir``.
 
     ``origin`` is a :class:`lanelet2.io.Origin` defining where local
     ``(x, y, z) = (0, 0, 0)`` lands in UTM. Output coordinates are metres in
     that local Cartesian frame (right-handed, Z-up — same as ClipGT).
+
+    ``tileset_json``, when set, aligns output to a scene frame defined by that
+    tileset's root ECEF transform. Points are then projected via
+    ``GeocentricProjector`` (ECEF) and transformed by ``inv(T_ecef_scene)``
+    instead of using ``origin``. This is required for downstream consumers
+    (e.g. alpasim's route sanity check) that read a trajectory living in the
+    same scene frame as the tileset.
     """
     import lanelet2  # imported lazily so the module is import-safe without ROS
 
     osm_path = Path(osm_path)
     out_dir = Path(out_dir)
 
-    proj = lanelet2.projection.UtmProjector(origin, True, False)
-    map_, _errors = lanelet2.io.loadRobust(str(osm_path), proj)
+    global _POINT_TRANSFORM
+    if tileset_json is not None:
+        _POINT_TRANSFORM = _load_ecef_scene_transform(Path(tileset_json))
+        proj = lanelet2.projection.GeocentricProjector()
+    else:
+        _POINT_TRANSFORM = None
+        proj = lanelet2.projection.UtmProjector(origin, True, False)
+    try:
+        map_, _errors = lanelet2.io.loadRobust(str(osm_path), proj)
+        return _convert_impl(map_, osm_path, out_dir, clip_id)
+    finally:
+        _POINT_TRANSFORM = None
+
+
+def _convert_impl(map_, osm_path: Path, out_dir: Path, clip_id: str | None) -> ConversionStats:
 
     clip_id = clip_id or f"lanelet2-{uuid.uuid4()}"
 

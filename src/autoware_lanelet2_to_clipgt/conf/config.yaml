@@ -16,3 +16,9 @@ output_dir: ???
 
 # Optional override stored in row keys; defaults to a fresh UUID.
 clip_id: null
+
+# Optional: path to a 3D Tiles tileset.json whose root.transform (ECEF) defines
+# the scene frame our output should align with. When set, polylines are
+# projected via GeocentricProjector and multiplied by inv(T_ecef_scene) so the
+# clipgt matches the trajectory embedded in the same USDZ.
+tileset_json: null

@@ -60,8 +60,18 @@ def main(cfg: DictConfig) -> int:
     fmt = (target_cfg.get("format") if hasattr(target_cfg, "get") else getattr(target_cfg, "format", None)) or "clipgt"
     logger.info("output format: %s", fmt)
 
+    tileset_json = cfg.get("tileset_json")
+    if tileset_json is not None:
+        tileset_json = Path(to_absolute_path(str(tileset_json)))
+
     if fmt == "clipgt":
-        stats = clipgt_converter.convert(osm_path, out_dir, origin, clip_id=cfg.get("clip_id"))
+        stats = clipgt_converter.convert(
+            osm_path,
+            out_dir,
+            origin,
+            clip_id=cfg.get("clip_id"),
+            tileset_json=tileset_json,
+        )
     elif fmt == "cosmos_transfer2_5":
         stats = cosmos_converter.convert(osm_path, out_dir, origin, clip_id=cfg.get("clip_id"))
     else:

@@ -20,6 +20,7 @@ import math
 from pathlib import Path
 
 import lanelet2
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
@@ -44,6 +45,23 @@ def clipgt_bundle(tmp_path_factory: pytest.TempPathFactory) -> Path:
         FIXTURE_MAP, out_dir, ODAIBA_ORIGIN, clip_id="test-clip"
     )
     return out_dir
+
+
+def _write_tileset_json(tmp_path: Path, ecef_translation: tuple[float, float, float]) -> Path:
+    """Write a minimal 3D Tiles tileset.json with an identity-rotation root transform."""
+    import json
+
+    tx, ty, tz = ecef_translation
+    # Column-major 4x4: identity rotation + translation in the last row.
+    transform = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        tx, ty, tz, 1.0,
+    ]
+    path = tmp_path / "tileset.json"
+    path.write_text(json.dumps({"root": {"transform": transform}}))
+    return path
 
 
 # --- _resample_polyline ---------------------------------------------------
@@ -174,6 +192,64 @@ def test_lane_rails_have_matching_lengths(clipgt_bundle: Path):
     df = pd.read_parquet(clipgt_bundle / "lane.parquet")
     for lane in df["lane"]:
         assert len(lane["left_rail"]) == len(lane["right_rail"])
+
+
+# --- Schema conformance ---------------------------------------------------
+
+
+# --- tileset_json (scene-frame alignment) --------------------------------
+
+
+def test_load_ecef_scene_transform_inverts_translation(tmp_path: Path):
+    # Identity rotation + non-zero translation: inverse should shift ECEF back to origin.
+    tileset = _write_tileset_json(tmp_path, (100.0, 200.0, 300.0))
+    T_scene_ecef = converter._load_ecef_scene_transform(tileset)
+    origin_scene = T_scene_ecef @ np.array([100.0, 200.0, 300.0, 1.0])
+    assert origin_scene[:3] == pytest.approx([0.0, 0.0, 0.0], abs=1e-6)
+
+
+@requires_fixture
+def test_tileset_alignment_moves_output_close_to_origin(
+    tmp_path_factory: pytest.TempPathFactory,
+):
+    # ECEF position for lat=35.6895, lon=139.6917 (the odaiba UtmProjector origin).
+    # A tileset centered here should make the converter emit points near (0,0,0).
+    # Compute ECEF via lanelet2's GeocentricProjector to avoid an extra dep.
+    ecef_pt = lanelet2.projection.GeocentricProjector().forward(
+        lanelet2.core.GPSPoint(35.6895, 139.6917, 0.0)
+    )
+    tileset = _write_tileset_json(
+        tmp_path_factory.mktemp("tileset"), (ecef_pt.x, ecef_pt.y, ecef_pt.z)
+    )
+
+    out_dir = tmp_path_factory.mktemp("aligned")
+    converter.convert(
+        FIXTURE_MAP, out_dir, ODAIBA_ORIGIN, clip_id="aligned", tileset_json=tileset,
+    )
+
+    lane = pd.read_parquet(out_dir / "lane.parquet").iloc[0]["lane"]
+    pt = lane["left_rail"][0]
+    # Odaiba lanes span roughly ±5 km from that origin — well below the 100 km
+    # bound we'd hit if inv(T_ecef_scene) weren't applied.
+    assert abs(pt["x"]) < 100_000
+    assert abs(pt["z"]) < 100_000
+
+
+def test_convert_clears_point_transform_state(tmp_path_factory: pytest.TempPathFactory):
+    # convert(tileset_json=...) sets a module-global; make sure a subsequent
+    # call without tileset_json sees a clean slate.
+    if not FIXTURE_MAP.exists():
+        pytest.skip("fixture map missing")
+    tileset = _write_tileset_json(tmp_path_factory.mktemp("t"), (0.0, 0.0, 0.0))
+    converter.convert(
+        FIXTURE_MAP, tmp_path_factory.mktemp("a"), ODAIBA_ORIGIN,
+        clip_id="a", tileset_json=tileset,
+    )
+    assert converter._POINT_TRANSFORM is None
+    converter.convert(
+        FIXTURE_MAP, tmp_path_factory.mktemp("b"), ODAIBA_ORIGIN, clip_id="b",
+    )
+    assert converter._POINT_TRANSFORM is None
 
 
 # --- Schema conformance ---------------------------------------------------
