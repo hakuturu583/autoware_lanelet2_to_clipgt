@@ -1,0 +1,282 @@
+# Cuts releases and publishes them to PyPI.
+#
+# Modelled on hakuturu583/simple_lanelet2's release.yml, which this project's
+# lanelet2 comes from. There are three ways in, and the first is the everyday one:
+#
+#   push to master  the auto-release mechanism. When a merged PR carries exactly one
+#                   `release:major|minor|patch` label, the `release` job bumps the
+#                   version, tags it `vX.Y.Z`, and the tag is built and published --
+#                   all in this one run.
+#   push a v* tag   a hand-cut tag (a hotfix, say) is built and published directly;
+#                   the `release` job is skipped.
+#   workflow_dispatch  builds the sdist and wheel without tagging or publishing, to
+#                   eyeball a release before committing to it.
+#
+# The publish happens as a follow-up job here rather than in a separate `on: push:
+# tags` workflow *on purpose*: the auto-release tag is pushed with GITHUB_TOKEN, and a
+# token-pushed tag does not start new workflow runs. Keeping both paths in one file
+# also means one place to trust.
+#
+# Authentication to PyPI is Trusted Publishing, so there is no API token in this
+# repository's secrets. That is configured once on PyPI's side -- Publishing -> add a
+# pending publisher with owner `hakuturu583`, repository `autoware_lanelet2_to_clipgt`,
+# workflow `release.yml`, environment `pypi`. Until that exists the publish step fails
+# and the artifacts are still downloadable from the run, which is the right way round:
+# nothing reaches PyPI without a deliberate action outside this repository.
+#
+# The `release:*` labels have to exist on the repository for a PR to carry one. They
+# are ordinary labels; create them once under Issues -> Labels.
+#
+# A version can never be replaced on PyPI, so `verify` runs here rather than trusting
+# that anything was green earlier on the same commit.
+
+name: Release
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Read the release label off the merged PR and, if there is one, bump the version
+  # and push the tag. Runs only on a push to master; a tag push or a manual dispatch
+  # skips it and falls straight through to the build.
+  release:
+    name: cut the release tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      bump: ${{ steps.pr.outputs.bump }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - name: read the release label off the merged PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls \
+            --jq '.[0] // empty' 2>/dev/null || true)
+          if [ -z "$pr_json" ]; then
+            echo "No PR associated with this push -- nothing to release"
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          labels=$(echo "$pr_json" | jq -r '[.labels[].name] | join(",")')
+          bump=none
+          count=0
+          for lvl in major minor patch; do
+            if echo ",$labels," | grep -q ",release:${lvl},"; then
+              bump=$lvl
+              count=$((count + 1))
+            fi
+          done
+          if [ "$count" -gt 1 ]; then
+            echo "::error::More than one release label on the PR -- pick exactly one"
+            exit 1
+          fi
+          echo "bump=${bump}" >> "$GITHUB_OUTPUT"
+          echo "Resolved bump level: ${bump}"
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.bump != 'none'
+        with:
+          ref: master
+          fetch-depth: 0
+
+      # pyproject.toml and uv.lock carry the version and have to move together, or
+      # `uv sync --locked` rejects the commit that was just released.
+      - name: bump pyproject and uv.lock together
+        if: steps.pr.outputs.bump != 'none'
+        id: bump
+        run: |
+          set -euo pipefail
+          next=$(python3 tools/bump_version.py "${{ steps.pr.outputs.bump }}")
+          echo "next=${next}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${next}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to ${next} (${{ steps.pr.outputs.bump }})"
+
+      - name: fail if the tag already exists
+        if: steps.pr.outputs.bump != 'none'
+        run: |
+          if git rev-parse "refs/tags/${{ steps.bump.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.bump.outputs.tag }} already exists" >&2
+            exit 1
+          fi
+
+      - name: commit, tag and push
+        if: steps.pr.outputs.bump != 'none'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml uv.lock
+          git commit -m "chore(release): ${{ steps.bump.outputs.tag }}"
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "Release ${{ steps.bump.outputs.tag }}"
+          git push origin "HEAD:master"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+      - name: GitHub release with generated notes
+        if: steps.pr.outputs.bump != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.bump.outputs.tag }}" \
+            --title "${{ steps.bump.outputs.tag }}" \
+            --generate-notes
+
+  # One place to work out, for all three entry points, which commit to build and
+  # whether it may be published. Runs even when `release` is skipped (tag, dispatch).
+  resolve:
+    name: resolve what to build
+    needs: [release]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.r.outputs.proceed }}
+      ref: ${{ steps.r.outputs.ref }}
+      publish: ${{ steps.r.outputs.publish }}
+      version: ${{ steps.r.outputs.version }}
+    steps:
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          BUMP: ${{ needs.release.outputs.bump }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          proceed=false; publish=false; ref="$REF_NAME"
+          if [ "$EVENT" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
+            # A hand-cut tag: build and publish it.
+            proceed=true; publish=true; ref="$REF_NAME"
+          elif [ "$EVENT" = "push" ] && [ "$REF" = "refs/heads/master" ]; then
+            # The auto-release path: build and publish only if a tag was cut.
+            if [ "$BUMP" != "none" ] && [ -n "$TAG" ]; then
+              proceed=true; publish=true; ref="$TAG"
+            fi
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            # A dry run: build the artifacts, publish nothing.
+            proceed=true; publish=false; ref="$REF_NAME"
+          fi
+          # The bare version, for the tag-matches-package check. Empty unless this
+          # is a release.
+          version=""
+          if [ "$publish" = true ]; then version="${ref#v}"; fi
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT ref=$ref proceed=$proceed publish=$publish version=$version"
+
+  verify:
+    name: test the tagged commit (py${{ matrix.python }})
+    needs: [resolve]
+    if: needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The whole span requires-python claims. simple-lanelet2 is an abi3 wheel, so
+        # this is the claim that actually needs defending -- the old lanelet2 build
+        # pinned the package to 3.10 alone.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - uses: astral-sh/setup-uv@v5
+
+      # `resolve` already stripped the `v`; stripping it again here would be a
+      # second implementation of the tag scheme in the same file.
+      - name: the version in the tag must be the version in the package
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          TAG: ${{ needs.resolve.outputs.version }}
+        run: |
+          PKG=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          echo "tag=$TAG pyproject=$PKG"
+          test "$TAG" = "$PKG"
+
+      # --locked, so a lock file that drifted from pyproject.toml fails here rather
+      # than after the version is on PyPI and unreplaceable.
+      - name: sync the locked environment
+        run: uv sync --locked --python ${{ matrix.python }}
+
+      # Most of this suite needs a Lanelet2 map at tests/data/odaiba.osm, which is not
+      # version-controlled; those cases skip themselves. What runs unconditionally is
+      # the ECEF/tileset maths and the schema invariants, and the smoke test below
+      # covers the end-to-end path without a fixture.
+      - run: uv run --no-sync pytest -q
+
+      - name: build the distributions
+        run: uv build
+
+      # The release check proper: nothing but the built wheel and its declared
+      # dependencies, in an environment that never saw the source tree. A wheel that
+      # drops the hydra config tree, or a dependency set without lanelet2 in it,
+      # fails here and nowhere else.
+      - name: install the wheel clean and convert a map with it
+        run: |
+          uv venv --python ${{ matrix.python }} /tmp/fresh
+          uv pip install --python /tmp/fresh dist/*.whl
+          /tmp/fresh/bin/python tools/smoke_test.py
+
+  build:
+    name: sdist and wheel
+    needs: [resolve, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+      - uses: astral-sh/setup-uv@v5
+      # Pure Python, so one `py3-none-any` wheel serves every platform and version
+      # the dependencies do. `verify` builds its own copy to test; this is the one
+      # that gets published, built from a clean checkout of the same ref.
+      - run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+  publish:
+    name: publish to PyPI
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/autoware-lanelet2-to-clipgt
+    permissions:
+      id-token: write   # Trusted Publishing; no token in secrets.
+    steps:
+      # Named explicitly rather than "everything in the run", so that adding a job
+      # that uploads anything else later cannot drag it into dist/ and break the
+      # upload after the tag has already been cut.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: ls -l dist
+
+      # PyPI rejects an upload whose metadata is malformed, and it does so after the
+      # OIDC exchange has succeeded -- so the same check runs here first, where
+      # failing costs nothing.
+      - name: check the metadata before uploading
+        run: pipx run twine check --strict dist/*
+
+      # PyPI refuses to replace a file but accepts new ones for an existing release,
+      # so skipping what is already there lets a re-run add what an earlier attempt
+      # failed to upload.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

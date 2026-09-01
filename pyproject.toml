@@ -1,12 +1,27 @@
 [project]
 name = "autoware-lanelet2-to-clipgt"
 version = "0.1.0"
-description = "Add your description here"
+description = "Convert Autoware Lanelet2 maps to ClipGT and cosmos-transfer2.5 parquet bundles"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Masaya Kataoka", email = "ms.kataoka@gmail.com" }
 ]
 requires-python = ">=3.10"
+keywords = ["lanelet2", "autoware", "clipgt", "cosmos-transfer", "hd-map", "autonomous-driving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    # simple-lanelet2 publishes manylinux wheels only, so this runs where those do.
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+]
 dependencies = [
     "simple-lanelet2>=1.1.2",
     "mgrs>=1.5.0",
@@ -17,6 +32,11 @@ dependencies = [
     "matplotlib>=3.10.9",
     "hydra-core>=1.3.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hakuturu583/autoware_lanelet2_to_clipgt"
+Repository = "https://github.com/hakuturu583/autoware_lanelet2_to_clipgt"
+Issues = "https://github.com/hakuturu583/autoware_lanelet2_to_clipgt/issues"
 
 [dependency-groups]
 dev = [
