@@ -94,3 +94,7 @@ freshly installed wheel.
 Releases are cut by labelling a pull request `release:major`, `release:minor` or
 `release:patch`; merging it bumps the version, tags it and publishes to PyPI. See
 [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+## License
+
+[Apache License 2.0](LICENSE).

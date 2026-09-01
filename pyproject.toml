@@ -3,6 +3,8 @@ name = "autoware-lanelet2-to-clipgt"
 version = "0.1.0"
 description = "Convert Autoware Lanelet2 maps to ClipGT and cosmos-transfer2.5 parquet bundles"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
     { name = "Masaya Kataoka", email = "ms.kataoka@gmail.com" }
 ]
