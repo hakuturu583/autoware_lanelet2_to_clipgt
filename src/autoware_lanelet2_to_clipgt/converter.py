@@ -699,7 +699,7 @@ def convert(
     (e.g. alpasim's route sanity check) that read a trajectory living in the
     same scene frame as the tileset.
     """
-    import lanelet2  # imported lazily so the module is import-safe without ROS
+    import lanelet2  # imported lazily; only a conversion needs the extension
 
     osm_path = Path(osm_path)
     out_dir = Path(out_dir)

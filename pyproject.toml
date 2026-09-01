@@ -6,9 +6,9 @@ readme = "README.md"
 authors = [
     { name = "Masaya Kataoka", email = "ms.kataoka@gmail.com" }
 ]
-requires-python = ">=3.10,<3.11"
+requires-python = ">=3.10"
 dependencies = [
-    "lanelet2-python-api-for-autoware",
+    "simple-lanelet2>=1.1.2",
     "mgrs>=1.5.0",
     "lxml>=5.2.2",
     "pyarrow>=24.0.0",
@@ -22,9 +22,6 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
-
-[tool.uv.sources]
-lanelet2-python-api-for-autoware = { git = "https://github.com/tier4/lanelet2_python_api_for_autoware", rev = "21cafbf9a855afbc4b89d4dfc3d299a411b64dde" }
 
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]
