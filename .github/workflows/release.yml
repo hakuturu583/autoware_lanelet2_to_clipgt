@@ -180,7 +180,13 @@ jobs:
   verify:
     name: test the tagged commit (py${{ matrix.python }})
     needs: [resolve]
-    if: needs.resolve.outputs.proceed == 'true'
+    # `!cancelled()` rather than a bare condition, because `release` is skipped on
+    # every path except an auto-release, and a skipped job skips its dependents
+    # transitively -- through `resolve`, whose `always()` only rescues itself. That
+    # left the tag and dispatch paths dead: `resolve` said proceed, and this was
+    # skipped anyway. Dropping the implicit success() means `resolve` has to be
+    # checked by hand, which is what `result` is for.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -233,6 +239,9 @@ jobs:
   build:
     name: sdist and wheel
     needs: [resolve, verify]
+    # Same inherited skip, same fix. `needs.verify.result` is the whole matrix's
+    # verdict, so one red interpreter stops the release.
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.resolve.outputs.proceed == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -251,7 +260,10 @@ jobs:
   publish:
     name: publish to PyPI
     needs: [resolve, build]
-    if: needs.resolve.outputs.publish == 'true'
+    # `needs.build.result` is not decoration: without the implicit success() this
+    # is the only thing standing between a failed build and an upload that can
+    # never be taken back.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.resolve.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
